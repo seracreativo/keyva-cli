@@ -10,79 +10,66 @@ import CryptoKit
 
 /// Encrypted storage for secrets in App Group container
 /// This allows the CLI to read secrets that were saved by the app
+///
+/// Key storage: The encryption key is stored in the App Group container (not Keychain)
+/// so that both the app and CLI can access it.
 public actor SecureStorage {
     public static let shared = SecureStorage()
 
-    private let fileName = "secrets.encrypted"
-    private let keyName = "com.seracreativo.keyva.encryption.key"
+    private let secretsFileName = "secrets.encrypted"
+    private let keyFileName = "encryption.key"
 
     private var cachedSecrets: [String: String]? = nil
 
     private init() {}
 
-    // MARK: - File URL
+    // MARK: - File URLs
+
+    private var containerURL: URL? {
+        FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupIdentifier
+        )
+    }
 
     private var storageURL: URL? {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) else {
-            return nil
-        }
-        return containerURL.appendingPathComponent(fileName)
+        containerURL?.appendingPathComponent(secretsFileName)
+    }
+
+    private var keyURL: URL? {
+        containerURL?.appendingPathComponent(keyFileName)
     }
 
     // MARK: - Encryption Key Management
 
-    /// Get or create the encryption key from Keychain
-    /// This key is stored in Keychain and used to encrypt/decrypt the secrets file
+    /// Get or create the encryption key from App Group container
+    /// This key is stored as a file and used to encrypt/decrypt the secrets file
     private func getOrCreateKey() throws -> SymmetricKey {
-        // Try to retrieve existing key
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keyName,
-            kSecAttrAccount as String: "encryption-key",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
+        guard let keyURL = keyURL else {
+            throw SecureStorageError.noAppGroupAccess
+        }
 
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        if status == errSecSuccess, let keyData = result as? Data {
-            return SymmetricKey(data: keyData)
+        // Try to read existing key from file
+        if FileManager.default.fileExists(atPath: keyURL.path) {
+            let keyData = try Data(contentsOf: keyURL)
+            if keyData.count == 32 { // 256 bits
+                return SymmetricKey(data: keyData)
+            }
         }
 
         // Create new key
         let newKey = SymmetricKey(size: .bits256)
         let keyData = newKey.withUnsafeBytes { Data($0) }
 
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keyName,
-            kSecAttrAccount as String: "encryption-key",
-            kSecValueData as String: keyData,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw SecureStorageError.keyCreationFailed
-        }
+        // Write to App Group container
+        try keyData.write(to: keyURL, options: [.atomic, .completeFileProtection])
 
         return newKey
     }
 
-    /// Check if encryption key exists (for CLI to know if it can read secrets)
+    /// Check if encryption key exists
     public func hasEncryptionKey() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keyName,
-            kSecAttrAccount as String: "encryption-key",
-            kSecReturnData as String: false
-        ]
-
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess
+        guard let keyURL = keyURL else { return false }
+        return FileManager.default.fileExists(atPath: keyURL.path)
     }
 
     // MARK: - Save/Load Secrets
@@ -97,11 +84,16 @@ public actor SecureStorage {
 
     /// Retrieve a secret from the encrypted storage
     public func retrieve(for variableId: UUID) throws -> String {
-        let secrets = try loadAllSecrets()
-        guard let value = secrets[variableId.uuidString] else {
-            throw SecureStorageError.secretNotFound
+        do {
+            let secrets = try loadAllSecrets()
+            guard let value = secrets[variableId.uuidString] else {
+                throw SecureStorageError.secretNotFound
+            }
+            return value
+        } catch {
+            print("🔐 SecureStorage retrieve error for \(variableId): \(error)")
+            throw error
         }
-        return value
     }
 
     /// Delete a secret from the encrypted storage
@@ -193,6 +185,40 @@ public actor SecureStorage {
     /// Clear cache (useful after sync operations)
     public func clearCache() {
         cachedSecrets = nil
+    }
+
+    /// Reset storage - delete secrets file and key (for migration from old key storage)
+    /// Call this when migrating from Keychain-based key to file-based key
+    public func resetStorage() throws {
+        cachedSecrets = nil
+
+        // Delete secrets file
+        if let url = storageURL, FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+            print("🔐 Deleted old secrets file")
+        }
+
+        // Delete key file (new key will be created on next save)
+        if let url = keyURL, FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+            print("🔐 Deleted old encryption key")
+        }
+    }
+
+    /// Check if storage needs reset (key exists in Keychain but not in file)
+    /// This detects the old storage format
+    public func needsReset() -> Bool {
+        let hasFileKey = hasEncryptionKey()
+
+        // If we have secrets file but no file-based key, need reset
+        if let url = storageURL,
+           FileManager.default.fileExists(atPath: url.path),
+           !hasFileKey {
+            print("🔐 Detected old storage format (Keychain key), needs reset")
+            return true
+        }
+
+        return false
     }
 }
 

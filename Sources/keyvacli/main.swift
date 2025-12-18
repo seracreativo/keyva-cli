@@ -14,7 +14,7 @@ struct Keyva: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "keyva",
         abstract: "Environment variables manager for developers",
-        version: "1.1.0",
+        version: "1.2.0",
         subcommands: [
             ProjectCommand.self,
             EnvCommand.self,
@@ -22,8 +22,94 @@ struct Keyva: AsyncParsableCommand {
             ExportCommand.self,
             LinkCommand.self,
             PullCommand.self,
+            DiagCommand.self,
         ]
     )
+}
+
+// MARK: - Diagnostic Command
+
+struct DiagCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "diag",
+        abstract: "Diagnostic information for troubleshooting"
+    )
+
+    @MainActor
+    func run() async throws {
+        print("Keyva CLI Diagnostics")
+        print("=====================\n")
+
+        // App Group
+        let appGroup = "group.com.seracreativo.keyva"
+        if let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) {
+            print("✅ App Group: \(appGroup)")
+            print("   Path: \(containerURL.path)")
+
+            // Check files
+            let secretsFile = containerURL.appendingPathComponent("secrets.encrypted")
+            let keyFile = containerURL.appendingPathComponent("encryption.key")
+
+            if FileManager.default.fileExists(atPath: secretsFile.path) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: secretsFile.path)
+                let size = attrs?[.size] as? Int ?? 0
+                print("   📁 secrets.encrypted: \(size) bytes")
+            } else {
+                print("   📁 secrets.encrypted: NOT FOUND")
+            }
+
+            if FileManager.default.fileExists(atPath: keyFile.path) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: keyFile.path)
+                let size = attrs?[.size] as? Int ?? 0
+                print("   🔑 encryption.key: \(size) bytes")
+            } else {
+                print("   🔑 encryption.key: NOT FOUND (needs app migration)")
+            }
+        } else {
+            print("❌ App Group: Cannot access \(appGroup)")
+        }
+
+        print("")
+
+        // SecureStorage status
+        let secureStorage = SecureStorage.shared
+        if await secureStorage.hasEncryptionKey() {
+            print("✅ SecureStorage: Key available")
+            do {
+                let ids = try await secureStorage.allSecretIds()
+                print("   Secrets stored: \(ids.count)")
+            } catch {
+                print("   ⚠️ Cannot read secrets: \(error)")
+            }
+        } else {
+            print("⚠️ SecureStorage: No encryption key")
+            print("   Run the Keyva app to initialize storage")
+        }
+
+        if await secureStorage.needsReset() {
+            print("\n⚠️ Storage needs migration to new format")
+            print("   Please launch the Keyva macOS app to migrate")
+        }
+
+        print("")
+
+        // DataStore
+        print("📊 DataStore:")
+        let store = DataStore.shared
+        do {
+            let projects = try store.listProjects()
+            print("   Projects: \(projects.count)")
+
+            var totalSecrets = 0
+            for project in projects {
+                let secrets = (project.variables ?? []).filter { $0.isSecret }
+                totalSecrets += secrets.count
+            }
+            print("   Total secrets: \(totalSecrets)")
+        } catch {
+            print("   ❌ Error: \(error)")
+        }
+    }
 }
 
 // MARK: - Project Commands

@@ -41,10 +41,17 @@ public actor KeychainService {
     ///   - value: The secret value to store
     ///   - variableId: The UUID of the Variable
     public func save(value: String, for variableId: UUID) async throws {
-        // Save to Keychain (primary - for app)
-        try saveToKeychain(value: value, for: variableId)
+        // Try to save to Keychain (primary - for app)
+        // This may fail in CLI context (no entitlements)
+        do {
+            try saveToKeychain(value: value, for: variableId)
+        } catch {
+            // Keychain access not available (e.g., CLI without entitlements)
+            // This is expected for CLI, so we continue to SecureStorage
+            print("⚠️ Keychain not available, using SecureStorage only")
+        }
 
-        // Also save to SecureStorage (for CLI access)
+        // Save to SecureStorage (works for both app and CLI)
         try await secureStorage.save(value: value, for: variableId)
     }
 
@@ -87,20 +94,35 @@ public actor KeychainService {
     /// Call this from the app on launch to ensure CLI can access secrets
     public func migrateToSecureStorage(variableIds: [UUID]) async throws {
         var secretsToMigrate: [UUID: String] = [:]
+        var foundInKeychain = 0
+        var alreadyInSecure = 0
+        var notInKeychain = 0
 
         for id in variableIds {
-            if let value = try? retrieveFromKeychain(for: id) {
+            do {
+                let value = try retrieveFromKeychain(for: id)
+                foundInKeychain += 1
                 // Check if already in SecureStorage
                 let existsInSecure = await secureStorage.exists(for: id)
                 if !existsInSecure {
                     secretsToMigrate[id] = value
+                } else {
+                    alreadyInSecure += 1
                 }
+            } catch {
+                notInKeychain += 1
             }
         }
+
+        print("🔐 Keychain status: \(foundInKeychain) found, \(notInKeychain) not in keychain, \(alreadyInSecure) already migrated")
 
         if !secretsToMigrate.isEmpty {
             try await secureStorage.saveAll(secretsToMigrate)
             print("✅ Migrated \(secretsToMigrate.count) secrets to SecureStorage for CLI access")
+        } else if foundInKeychain > 0 {
+            print("✅ All secrets already in SecureStorage")
+        } else {
+            print("⚠️ No secrets found in Keychain - they may need to be re-entered in the app")
         }
     }
 
