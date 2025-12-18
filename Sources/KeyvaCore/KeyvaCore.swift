@@ -10,4 +10,4 @@
 
 // This file ensures all public types are accessible when importing KeyvaCore
 // Models: Project, EnvironmentGroup, Variable
-// Services: DataStore, KeychainService, EnvExporter, ExportFormat
+// Services: DataStore, KeychainService, SecureStorage, EnvExporter, ExportFormat, LinkService

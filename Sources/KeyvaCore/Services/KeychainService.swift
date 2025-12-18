@@ -2,6 +2,8 @@
 //  KeychainService.swift
 //  KeyvaCore
 //
+//  Dual storage: Keychain (primary, app-only) + SecureStorage (shared with CLI)
+//
 
 import Foundation
 import Security
@@ -30,22 +32,89 @@ public actor KeychainService {
     public static let shared = KeychainService()
 
     private let serviceName = "com.seracreativo.keyva.secrets"
+    private let secureStorage = SecureStorage.shared
 
     private init() {}
 
-    /// Save a secret value to Keychain (syncs via iCloud Keychain)
+    /// Save a secret value to both Keychain and SecureStorage
     /// - Parameters:
     ///   - value: The secret value to store
     ///   - variableId: The UUID of the Variable
-    public func save(value: String, for variableId: UUID) throws {
+    public func save(value: String, for variableId: UUID) async throws {
+        // Save to Keychain (primary - for app)
+        try saveToKeychain(value: value, for: variableId)
+
+        // Also save to SecureStorage (for CLI access)
+        try await secureStorage.save(value: value, for: variableId)
+    }
+
+    /// Retrieve a secret value - tries Keychain first, then SecureStorage
+    /// - Parameter variableId: The UUID of the Variable
+    /// - Returns: The secret value
+    public func retrieve(for variableId: UUID) async throws -> String {
+        // Try Keychain first (app has access)
+        if let value = try? retrieveFromKeychain(for: variableId) {
+            return value
+        }
+
+        // Fall back to SecureStorage (CLI uses this)
+        return try await secureStorage.retrieve(for: variableId)
+    }
+
+    /// Delete a secret from both Keychain and SecureStorage
+    /// - Parameter variableId: The UUID of the Variable
+    public func delete(for variableId: UUID) async throws {
+        // Delete from Keychain
+        try? deleteFromKeychain(for: variableId)
+
+        // Delete from SecureStorage
+        try? await secureStorage.delete(for: variableId)
+    }
+
+    /// Check if a secret exists in either storage
+    /// - Parameter variableId: The UUID of the Variable
+    /// - Returns: True if the secret exists
+    public func exists(for variableId: UUID) async -> Bool {
+        if existsInKeychain(for: variableId) {
+            return true
+        }
+        return await secureStorage.exists(for: variableId)
+    }
+
+    // MARK: - Migration
+
+    /// Migrate all secrets from Keychain to SecureStorage
+    /// Call this from the app on launch to ensure CLI can access secrets
+    public func migrateToSecureStorage(variableIds: [UUID]) async throws {
+        var secretsToMigrate: [UUID: String] = [:]
+
+        for id in variableIds {
+            if let value = try? retrieveFromKeychain(for: id) {
+                // Check if already in SecureStorage
+                let existsInSecure = await secureStorage.exists(for: id)
+                if !existsInSecure {
+                    secretsToMigrate[id] = value
+                }
+            }
+        }
+
+        if !secretsToMigrate.isEmpty {
+            try await secureStorage.saveAll(secretsToMigrate)
+            print("✅ Migrated \(secretsToMigrate.count) secrets to SecureStorage for CLI access")
+        }
+    }
+
+    // MARK: - Keychain Operations (Private)
+
+    private func saveToKeychain(value: String, for variableId: UUID) throws {
         let account = variableId.uuidString
 
         guard let data = value.data(using: .utf8) else {
             throw KeychainError.invalidData
         }
 
-        // First, try to delete any existing item (both sync and non-sync)
-        try? delete(for: variableId)
+        // First, try to delete any existing item
+        try? deleteFromKeychain(for: variableId)
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -53,7 +122,6 @@ public actor KeychainService {
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            // Sync via iCloud Keychain (encrypted end-to-end)
             kSecAttrSynchronizable as String: kCFBooleanTrue as Any
         ]
 
@@ -79,10 +147,7 @@ public actor KeychainService {
         }
     }
 
-    /// Retrieve a secret value from Keychain
-    /// - Parameter variableId: The UUID of the Variable
-    /// - Returns: The secret value
-    public func retrieve(for variableId: UUID) throws -> String {
+    private func retrieveFromKeychain(for variableId: UUID) throws -> String {
         let account = variableId.uuidString
 
         let query: [String: Any] = [
@@ -112,9 +177,7 @@ public actor KeychainService {
         return string
     }
 
-    /// Delete a secret from Keychain
-    /// - Parameter variableId: The UUID of the Variable
-    public func delete(for variableId: UUID) throws {
+    private func deleteFromKeychain(for variableId: UUID) throws {
         let account = variableId.uuidString
 
         let query: [String: Any] = [
@@ -130,10 +193,7 @@ public actor KeychainService {
         }
     }
 
-    /// Check if a secret exists in Keychain
-    /// - Parameter variableId: The UUID of the Variable
-    /// - Returns: True if the secret exists
-    public func exists(for variableId: UUID) -> Bool {
+    private func existsInKeychain(for variableId: UUID) -> Bool {
         let account = variableId.uuidString
 
         let query: [String: Any] = [

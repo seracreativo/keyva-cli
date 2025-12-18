@@ -14,12 +14,14 @@ struct Keyva: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "keyva",
         abstract: "Environment variables manager for developers",
-        version: "1.0.0",
+        version: "1.1.0",
         subcommands: [
             ProjectCommand.self,
             EnvCommand.self,
             VarCommand.self,
             ExportCommand.self,
+            LinkCommand.self,
+            PullCommand.self,
         ]
     )
 }
@@ -76,6 +78,9 @@ struct ProjectCreate: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "SF Symbol icon name")
     var icon: String = "folder.fill"
 
+    @Flag(name: .long, help: "Create with default environments (Development, Staging, Production)")
+    var withDefaults: Bool = false
+
     @MainActor
     func run() async throws {
         let store = DataStore.shared
@@ -88,6 +93,20 @@ struct ProjectCreate: AsyncParsableCommand {
 
         let project = try store.createProject(name: name, icon: icon)
         print("✓ Created project '\(project.name)'")
+
+        // Create default environments if requested
+        if withDefaults {
+            let defaults = [
+                ("Development", "hammer.fill"),
+                ("Staging", "shippingbox.fill"),
+                ("Production", "bolt.fill")
+            ]
+
+            for (envName, envIcon) in defaults {
+                _ = try store.createEnvironment(name: envName, icon: envIcon, in: project)
+                print("  ✓ Created environment '\(envName)'")
+            }
+        }
     }
 }
 
@@ -145,27 +164,28 @@ struct EnvList: AsyncParsableCommand {
         abstract: "List environments in a project"
     )
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
         }
 
         let envs = store.listEnvironments(in: proj)
 
         if envs.isEmpty {
-            print("No environments in '\(project)'.")
-            print("Create one with: keyva env create \"dev\" --project \"\(project)\"")
+            print("No environments in '\(projectName)'.")
+            print("Create one with: keyva env create \"dev\" --project \"\(projectName)\"")
             return
         }
 
-        print("Environments in '\(project)' (\(envs.count)):")
+        print("Environments in '\(projectName)' (\(envs.count)):")
         for env in envs {
             let varCount = proj.variables(for: env.id).count
             print("  • \(env.name) (\(varCount) vars)")
@@ -179,11 +199,11 @@ struct EnvCreate: AsyncParsableCommand {
         abstract: "Create a new environment"
     )
 
-    @Argument(help: "Environment name")
+    @Argument(help: "Environment name (or 'defaults' to create Development, Staging, Production)")
     var name: String
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Option(name: .shortAndLong, help: "SF Symbol icon name")
     var icon: String = "folder.fill"
@@ -191,15 +211,35 @@ struct EnvCreate: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
+        }
+
+        // Special case: create defaults
+        if name.lowercased() == "defaults" {
+            let defaults = [
+                ("Development", "hammer.fill"),
+                ("Staging", "shippingbox.fill"),
+                ("Production", "bolt.fill")
+            ]
+
+            for (envName, envIcon) in defaults {
+                if store.getEnvironment(name: envName, in: proj) == nil {
+                    _ = try store.createEnvironment(name: envName, icon: envIcon, in: proj)
+                    print("✓ Created environment '\(envName)' in '\(projectName)'")
+                } else {
+                    print("  • '\(envName)' already exists")
+                }
+            }
+            return
         }
 
         // Check if env already exists
         if let _ = store.getEnvironment(name: name, in: proj) {
-            print("Error: Environment '\(name)' already exists in '\(project)'.")
+            print("Error: Environment '\(name)' already exists in '\(projectName)'.")
             throw ExitCode.failure
         }
 
@@ -208,7 +248,7 @@ struct EnvCreate: AsyncParsableCommand {
         let finalIcon = icon == "folder.fill" ? suggestedIcons.first ?? icon : icon
 
         let env = try store.createEnvironment(name: name, icon: finalIcon, in: proj)
-        print("✓ Created environment '\(env.name)' in '\(project)'")
+        print("✓ Created environment '\(env.name)' in '\(projectName)'")
     }
 }
 
@@ -221,8 +261,8 @@ struct EnvDelete: AsyncParsableCommand {
     @Argument(help: "Environment name")
     var name: String
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Flag(name: .shortAndLong, help: "Skip confirmation prompt")
     var force: Bool = false
@@ -230,19 +270,20 @@ struct EnvDelete: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
         }
 
         guard let env = store.getEnvironment(name: name, in: proj) else {
-            print("Error: Environment '\(name)' not found in '\(project)'.")
+            print("Error: Environment '\(name)' not found in '\(projectName)'.")
             throw ExitCode.failure
         }
 
         if !force {
-            print("Delete environment '\(name)' from '\(project)'? [y/N] ", terminator: "")
+            print("Delete environment '\(name)' from '\(projectName)'? [y/N] ", terminator: "")
             guard let response = readLine()?.lowercased(), response == "y" || response == "yes" else {
                 print("Cancelled.")
                 return
@@ -250,7 +291,7 @@ struct EnvDelete: AsyncParsableCommand {
         }
 
         try await store.deleteEnvironment(env, in: proj)
-        print("✓ Deleted environment '\(name)' from '\(project)'")
+        print("✓ Deleted environment '\(name)' from '\(projectName)'")
     }
 }
 
@@ -275,8 +316,8 @@ struct VarList: AsyncParsableCommand {
         abstract: "List variables in an environment"
     )
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Option(name: .shortAndLong, help: "Environment name")
     var env: String
@@ -287,26 +328,28 @@ struct VarList: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
         }
 
-        guard let environment = store.getEnvironment(name: env, in: proj) else {
-            print("Error: Environment '\(env)' not found in '\(project)'.")
+        let envName = resolveEnvName(env, in: proj)
+        guard let environment = store.getEnvironment(name: envName, in: proj) else {
+            print("Error: Environment '\(env)' not found in '\(projectName)'.")
             throw ExitCode.failure
         }
 
         let variables = store.listVariables(in: environment, project: proj)
 
         if variables.isEmpty {
-            print("No variables in '\(project)/\(env)'.")
-            print("Add one with: keyva var set KEY value --project \"\(project)\" --env \"\(env)\"")
+            print("No variables in '\(projectName)/\(envName)'.")
+            print("Add one with: keyva var set KEY value --env \"\(envName)\"")
             return
         }
 
-        print("Variables in '\(project)/\(env)' (\(variables.count)):")
+        print("Variables in '\(projectName)/\(envName)' (\(variables.count)):")
         for variable in variables {
             var value: String
             if variable.isSecret {
@@ -338,13 +381,13 @@ struct VarSet: AsyncParsableCommand {
     @Argument(help: "Variable value")
     var value: String
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Option(name: .shortAndLong, help: "Environment name")
     var env: String
 
-    @Flag(name: .shortAndLong, help: "Mark as secret (stored in Keychain)")
+    @Flag(name: .shortAndLong, help: "Mark as secret (stored securely)")
     var secret: Bool = false
 
     @Option(name: .shortAndLong, help: "Optional notes")
@@ -353,14 +396,16 @@ struct VarSet: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
         }
 
-        guard let environment = store.getEnvironment(name: env, in: proj) else {
-            print("Error: Environment '\(env)' not found in '\(project)'.")
+        let envName = resolveEnvName(env, in: proj)
+        guard let environment = store.getEnvironment(name: envName, in: proj) else {
+            print("Error: Environment '\(env)' not found in '\(projectName)'.")
             throw ExitCode.failure
         }
 
@@ -374,7 +419,7 @@ struct VarSet: AsyncParsableCommand {
         )
 
         let secretNote = secret ? " (secret)" : ""
-        print("✓ Set \(key)=\(secret ? "[SECRET]" : value)\(secretNote) in '\(project)/\(env)'")
+        print("✓ Set \(key)=\(secret ? "[SECRET]" : value)\(secretNote) in '\(projectName)/\(envName)'")
     }
 }
 
@@ -387,8 +432,8 @@ struct VarGet: AsyncParsableCommand {
     @Argument(help: "Variable key")
     var key: String
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Option(name: .shortAndLong, help: "Environment name")
     var env: String
@@ -396,19 +441,21 @@ struct VarGet: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
         }
 
-        guard let environment = store.getEnvironment(name: env, in: proj) else {
-            print("Error: Environment '\(env)' not found in '\(project)'.")
+        let envName = resolveEnvName(env, in: proj)
+        guard let environment = store.getEnvironment(name: envName, in: proj) else {
+            print("Error: Environment '\(env)' not found in '\(projectName)'.")
             throw ExitCode.failure
         }
 
         guard let variable = store.getVariable(key: key, in: environment, project: proj) else {
-            print("Error: Variable '\(key)' not found in '\(project)/\(env)'.")
+            print("Error: Variable '\(key)' not found in '\(projectName)/\(envName)'.")
             throw ExitCode.failure
         }
 
@@ -433,8 +480,8 @@ struct VarDelete: AsyncParsableCommand {
     @Argument(help: "Variable key")
     var key: String
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Option(name: .shortAndLong, help: "Environment name")
     var env: String
@@ -445,24 +492,26 @@ struct VarDelete: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let projectName = try resolveProjectName(project)
 
-        guard let proj = try store.getProject(name: project) else {
-            print("Error: Project '\(project)' not found.")
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
             throw ExitCode.failure
         }
 
-        guard let environment = store.getEnvironment(name: env, in: proj) else {
-            print("Error: Environment '\(env)' not found in '\(project)'.")
+        let envName = resolveEnvName(env, in: proj)
+        guard let environment = store.getEnvironment(name: envName, in: proj) else {
+            print("Error: Environment '\(env)' not found in '\(projectName)'.")
             throw ExitCode.failure
         }
 
         guard let variable = store.getVariable(key: key, in: environment, project: proj) else {
-            print("Error: Variable '\(key)' not found in '\(project)/\(env)'.")
+            print("Error: Variable '\(key)' not found in '\(projectName)/\(envName)'.")
             throw ExitCode.failure
         }
 
         if !force {
-            print("Delete variable '\(key)' from '\(project)/\(env)'? [y/N] ", terminator: "")
+            print("Delete variable '\(key)' from '\(projectName)/\(envName)'? [y/N] ", terminator: "")
             guard let response = readLine()?.lowercased(), response == "y" || response == "yes" else {
                 print("Cancelled.")
                 return
@@ -470,7 +519,7 @@ struct VarDelete: AsyncParsableCommand {
         }
 
         try await store.deleteVariable(variable)
-        print("✓ Deleted variable '\(key)' from '\(project)/\(env)'")
+        print("✓ Deleted variable '\(key)' from '\(projectName)/\(envName)'")
     }
 }
 
@@ -482,24 +531,64 @@ struct ExportCommand: AsyncParsableCommand {
         abstract: "Export variables to a file"
     )
 
-    @Option(name: .shortAndLong, help: "Project name")
-    var project: String
+    @Argument(help: "Environment name (e.g., 'prod', 'dev', 'staging')")
+    var env: String?
 
-    @Option(name: .shortAndLong, help: "Environment name")
-    var env: String
+    @Option(name: .shortAndLong, help: "Project name (optional if directory is linked)")
+    var project: String?
 
     @Option(name: .shortAndLong, help: "Output format (env, json, yaml, xcconfig)")
     var format: String = "env"
 
-    @Option(name: .shortAndLong, help: "Output file (default: stdout)")
+    @Option(name: .shortAndLong, help: "Output file (default: .env in current directory)")
     var output: String?
 
     @Flag(name: .long, help: "Include secret values in output")
     var includeSecrets: Bool = false
 
+    @Flag(name: .long, help: "Print to stdout instead of file")
+    var stdout: Bool = false
+
     @MainActor
     func run() async throws {
         let store = DataStore.shared
+        let linkService = LinkService.shared
+        let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        // Resolve project name
+        let projectName: String
+        if let p = project {
+            projectName = p
+        } else if let link = linkService.getLink(for: currentDir) {
+            projectName = link.projectName
+        } else {
+            print("Error: No project specified and current directory is not linked.")
+            print("Use --project or run 'keyva link <project>' first.")
+            throw ExitCode.failure
+        }
+
+        guard let proj = try store.getProject(name: projectName) else {
+            print("Error: Project '\(projectName)' not found.")
+            throw ExitCode.failure
+        }
+
+        // Resolve environment name
+        let envName: String
+        if let e = env {
+            envName = resolveEnvName(e, in: proj)
+        } else if let link = linkService.getLink(for: currentDir), let defaultEnv = link.defaultEnvironment {
+            envName = defaultEnv
+        } else {
+            print("Error: No environment specified.")
+            print("Use: keyva export <env> (e.g., keyva export prod)")
+            throw ExitCode.failure
+        }
+
+        guard let environment = store.getEnvironment(name: envName, in: proj) else {
+            print("Error: Environment '\(envName)' not found in '\(projectName)'.")
+            print("Available: \((proj.groups ?? []).map { $0.name }.joined(separator: ", "))")
+            throw ExitCode.failure
+        }
 
         // Parse format
         let exportFormat: ExportFormat
@@ -518,26 +607,258 @@ struct ExportCommand: AsyncParsableCommand {
         }
 
         // Get content
-        let content: String
-        do {
-            content = try await store.exportByName(
-                projectName: project,
-                envName: env,
-                format: exportFormat,
-                includeSecrets: includeSecrets
-            )
-        } catch let error as DataStoreError {
-            print("Error: \(error.localizedDescription)")
+        let content = await store.export(
+            project: proj,
+            env: environment,
+            format: exportFormat,
+            includeSecrets: includeSecrets
+        )
+
+        // Output
+        if stdout {
+            print(content)
+        } else {
+            let outputPath = output ?? defaultOutputPath(for: exportFormat)
+            let url = URL(fileURLWithPath: outputPath)
+            try content.write(to: url, atomically: true, encoding: .utf8)
+            print("✓ Exported \(projectName)/\(envName) to \(outputPath)")
+        }
+    }
+
+    private func defaultOutputPath(for format: ExportFormat) -> String {
+        switch format {
+        case .dotenv: return ".env"
+        case .json: return "env.json"
+        case .yaml: return "env.yaml"
+        case .xcconfig: return "Config.xcconfig"
+        }
+    }
+}
+
+// MARK: - Link Command
+
+struct LinkCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "link",
+        abstract: "Link current directory to a project",
+        subcommands: [
+            LinkSet.self,
+            LinkRemove.self,
+            LinkShow.self,
+            LinkList.self,
+        ],
+        defaultSubcommand: LinkSet.self
+    )
+}
+
+struct LinkSet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "set",
+        abstract: "Link current directory to a project"
+    )
+
+    @Argument(help: "Project name to link")
+    var project: String
+
+    @Option(name: .shortAndLong, help: "Default environment for exports")
+    var defaultEnv: String?
+
+    @Flag(name: .long, help: "Store link globally (not in .keyva file)")
+    var global: Bool = false
+
+    @MainActor
+    func run() async throws {
+        let store = DataStore.shared
+        let linkService = LinkService.shared
+        let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        // Verify project exists
+        guard let proj = try store.getProject(name: project) else {
+            print("Error: Project '\(project)' not found.")
+            print("Available projects:")
+            for p in try store.listProjects() {
+                print("  • \(p.name)")
+            }
             throw ExitCode.failure
         }
 
-        // Output
-        if let outputPath = output {
-            let url = URL(fileURLWithPath: outputPath)
-            try content.write(to: url, atomically: true, encoding: .utf8)
-            print("✓ Exported to \(outputPath)")
+        // Verify default env exists if specified
+        if let envName = defaultEnv {
+            let resolved = resolveEnvName(envName, in: proj)
+            guard store.getEnvironment(name: resolved, in: proj) != nil else {
+                print("Error: Environment '\(envName)' not found in '\(project)'.")
+                throw ExitCode.failure
+            }
+        }
+
+        if global {
+            try linkService.addGlobalLink(directory: currentDir, to: project, defaultEnv: defaultEnv)
+            print("✓ Linked '\(currentDir.lastPathComponent)' → '\(project)' (global)")
         } else {
-            print(content)
+            try linkService.link(directory: currentDir, to: project, defaultEnv: defaultEnv)
+            print("✓ Linked '\(currentDir.lastPathComponent)' → '\(project)'")
+            print("  Created .keyva file (add to .gitignore)")
+        }
+
+        if let env = defaultEnv {
+            print("  Default environment: \(env)")
+        }
+
+        print("\nNow you can use:")
+        print("  keyva export prod        # Export Production to .env")
+        print("  keyva export dev         # Export Development to .env")
+        print("  keyva var list --env prod")
+    }
+}
+
+struct LinkRemove: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "remove",
+        abstract: "Remove link from current directory"
+    )
+
+    @Flag(name: .long, help: "Remove global link")
+    var global: Bool = false
+
+    func run() throws {
+        let linkService = LinkService.shared
+        let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        if global {
+            try linkService.removeGlobalLink(for: currentDir)
+            print("✓ Removed global link for '\(currentDir.lastPathComponent)'")
+        } else {
+            try linkService.unlink(directory: currentDir)
+            print("✓ Removed link (deleted .keyva file)")
         }
     }
+}
+
+struct LinkShow: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "show",
+        abstract: "Show current directory link"
+    )
+
+    func run() {
+        let linkService = LinkService.shared
+        let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        if let link = linkService.getLink(for: currentDir) {
+            print("Current directory linked to:")
+            print("  Project: \(link.projectName)")
+            if let env = link.defaultEnvironment {
+                print("  Default env: \(env)")
+            }
+        } else {
+            print("Current directory is not linked to any project.")
+            print("Use 'keyva link <project>' to link.")
+        }
+    }
+}
+
+struct LinkList: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List all global links"
+    )
+
+    func run() {
+        let linkService = LinkService.shared
+        let links = linkService.listGlobalLinks()
+
+        if links.isEmpty {
+            print("No global links configured.")
+            return
+        }
+
+        print("Global links:")
+        for (path, config) in links.sorted(by: { $0.key < $1.key }) {
+            let envInfo = config.defaultEnvironment.map { " (default: \($0))" } ?? ""
+            print("  \(path) → \(config.projectName)\(envInfo)")
+        }
+    }
+}
+
+// MARK: - Pull Command (shorthand for export)
+
+struct PullCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pull",
+        abstract: "Quick export: keyva pull prod → exports .env"
+    )
+
+    @Argument(help: "Environment name (prod, dev, staging)")
+    var env: String
+
+    @Flag(name: .long, help: "Include secret values")
+    var secrets: Bool = false
+
+    @MainActor
+    func run() async throws {
+        let store = DataStore.shared
+        let linkService = LinkService.shared
+        let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        guard let link = linkService.getLink(for: currentDir) else {
+            print("Error: Current directory is not linked to a project.")
+            print("Use 'keyva link <project>' first.")
+            throw ExitCode.failure
+        }
+
+        guard let proj = try store.getProject(name: link.projectName) else {
+            print("Error: Linked project '\(link.projectName)' not found.")
+            throw ExitCode.failure
+        }
+
+        let envName = resolveEnvName(env, in: proj)
+        guard let environment = store.getEnvironment(name: envName, in: proj) else {
+            print("Error: Environment '\(env)' not found.")
+            print("Available: \((proj.groups ?? []).map { $0.name }.joined(separator: ", "))")
+            throw ExitCode.failure
+        }
+
+        let content = await store.export(
+            project: proj,
+            env: environment,
+            format: .dotenv,
+            includeSecrets: secrets
+        )
+
+        let outputPath = ".env"
+        try content.write(toFile: outputPath, atomically: true, encoding: .utf8)
+        print("✓ Pulled \(link.projectName)/\(envName) → .env")
+    }
+}
+
+// MARK: - Helpers
+
+/// Resolve project name from argument or link
+func resolveProjectName(_ projectArg: String?) throws -> String {
+    if let name = projectArg {
+        return name
+    }
+
+    let linkService = LinkService.shared
+    let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+    if let link = linkService.getLink(for: currentDir) {
+        return link.projectName
+    }
+
+    print("Error: No project specified and current directory is not linked.")
+    print("Use --project or run 'keyva link <project>' first.")
+    throw ExitCode.failure
+}
+
+/// Resolve environment alias to actual name
+func resolveEnvName(_ alias: String, in project: Project) -> String {
+    let linkService = LinkService.shared
+
+    if let resolved = linkService.resolveEnvironmentName(alias, in: project) {
+        return resolved
+    }
+
+    // Return as-is if not found (will error later)
+    return alias
 }

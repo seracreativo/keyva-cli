@@ -254,6 +254,28 @@ public class DataStore {
         try context.save()
     }
 
+    // MARK: - Migration
+
+    /// Migrate existing secrets from Keychain to SecureStorage for CLI access
+    /// Call this on app launch
+    public func migrateSecretsForCLI() async {
+        do {
+            let projects = try listProjects()
+            var secretVariableIds: [UUID] = []
+
+            for project in projects {
+                let secretVars = (project.variables ?? []).filter { $0.isSecret }
+                secretVariableIds.append(contentsOf: secretVars.map { $0.id })
+            }
+
+            if !secretVariableIds.isEmpty {
+                try await keychain.migrateToSecureStorage(variableIds: secretVariableIds)
+            }
+        } catch {
+            print("⚠️ Migration error: \(error)")
+        }
+    }
+
     // MARK: - Export
 
     public func export(
