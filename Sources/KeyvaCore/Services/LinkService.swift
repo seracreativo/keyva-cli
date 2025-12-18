@@ -87,9 +87,13 @@ public class LinkService {
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroupIdentifier
         ) else {
-            // Fallback to home directory for CLI
+            #if os(macOS)
+            // Fallback to home directory for CLI (macOS only)
             let homeDir = FileManager.default.homeDirectoryForCurrentUser
             return homeDir.appendingPathComponent(".keyva").appendingPathComponent(globalConfigFileName)
+            #else
+            return nil
+            #endif
         }
         return containerURL.appendingPathComponent(globalConfigFileName)
     }
