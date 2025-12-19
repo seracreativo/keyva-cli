@@ -55,30 +55,39 @@ fi
 # Download
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/v$LATEST_VERSION/keyva-$LATEST_VERSION-$ARCH_SUFFIX.tar.gz"
 TEMP_DIR=$(mktemp -d)
+TEMP_TAR="$TEMP_DIR/keyva.tar.gz"
+TEMP_BIN="$TEMP_DIR/keyva"
 
 echo "Downloading from $DOWNLOAD_URL..."
-curl -fsSL "$DOWNLOAD_URL" -o "$TEMP_DIR/keyva.tar.gz"
+curl -fsSL "$DOWNLOAD_URL" -o "$TEMP_TAR"
 
-# Extract
-cd "$TEMP_DIR"
-tar -xzf keyva.tar.gz
+# Extract to temp dir
+tar -xzf "$TEMP_TAR" -C "$TEMP_DIR"
+
+# Verify binary exists
+if [ ! -f "$TEMP_BIN" ]; then
+    echo -e "${RED}Error: Binary not found after extraction${NC}"
+    rm -rf "$TEMP_DIR"
+    exit 1
+fi
 
 # Install (may need sudo)
 if [ -w "$INSTALL_DIR" ]; then
-    mv keyva "$INSTALL_DIR/$BINARY_NAME"
+    mv "$TEMP_BIN" "$INSTALL_DIR/$BINARY_NAME"
+    chmod +x "$INSTALL_DIR/$BINARY_NAME"
 else
     echo "Installing to $INSTALL_DIR (requires sudo)..."
-    sudo mv keyva "$INSTALL_DIR/$BINARY_NAME"
+    sudo mv "$TEMP_BIN" "$INSTALL_DIR/$BINARY_NAME"
+    sudo chmod +x "$INSTALL_DIR/$BINARY_NAME"
 fi
-
-chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
 # Cleanup
 rm -rf "$TEMP_DIR"
 
 # Verify
 if command -v keyva &> /dev/null; then
-    echo -e "${GREEN}✓ Keyva CLI v$LATEST_VERSION installed successfully${NC}"
+    INSTALLED_VERSION=$(keyva --version 2>/dev/null || echo "unknown")
+    echo -e "${GREEN}✓ Keyva CLI v$INSTALLED_VERSION installed successfully${NC}"
     echo ""
     echo "Run 'keyva' to start, or 'keyva --help' for options"
 else
