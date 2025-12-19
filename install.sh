@@ -71,6 +71,12 @@ if [ ! -f "$TEMP_BIN" ]; then
     exit 1
 fi
 
+# Create install dir if needed
+if [ ! -d "$INSTALL_DIR" ]; then
+    echo "Creating $INSTALL_DIR..."
+    sudo mkdir -p "$INSTALL_DIR"
+fi
+
 # Install (may need sudo)
 if [ -w "$INSTALL_DIR" ]; then
     mv "$TEMP_BIN" "$INSTALL_DIR/$BINARY_NAME"
