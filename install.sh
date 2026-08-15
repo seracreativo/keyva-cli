@@ -1,12 +1,21 @@
 #!/bin/bash
 # Keyva CLI Installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/seracreativo/keyva-cli/main/install.sh | bash
+#
+# Installs two binaries:
+#   keyva      — the command-line tool
+#   keyva-mcp  — the MCP server Claude Code talks to
+#
+# Both matter. The copy of keyva-mcp inside Keyva.app is sandboxed, as the App
+# Store requires, and a sandboxed server cannot reach your repositories: it
+# cannot scan for leaked secrets, write a .env, or run a command in your
+# project. This one can, so the last step points Claude Code at it.
 
 set -e
 
 REPO="seracreativo/keyva-cli"
 INSTALL_DIR="$HOME/.local/bin"
-BINARY_NAME="keyva"
+BINARIES=(keyva keyva-mcp)
 
 # Colors
 RED='\033[0;31m'
@@ -49,18 +58,21 @@ get_latest_version() {
 }
 
 # Download and install
-install_binary() {
-    local url="https://github.com/$REPO/releases/download/v$LATEST/keyva-$LATEST-$ARCH.tar.gz"
+install_binaries() {
+    local base="https://github.com/$REPO/releases/download/v$LATEST"
     local tmp_dir=$(mktemp -d)
 
     info "Downloading keyva v$LATEST..."
 
-    if ! curl -fsSL "$url" -o "$tmp_dir/keyva.tar.gz"; then
-        rm -rf "$tmp_dir"
-        error "Download failed. Check if release exists for your architecture ($ARCH)"
+    # Prefer the universal build; fall back to a per-architecture asset so
+    # older releases keep installing.
+    if ! curl -fsSL "$base/keyva-$LATEST-universal.tar.gz" -o "$tmp_dir/keyva.tar.gz" 2>/dev/null; then
+        if ! curl -fsSL "$base/keyva-$LATEST-$ARCH.tar.gz" -o "$tmp_dir/keyva.tar.gz"; then
+            rm -rf "$tmp_dir"
+            error "Download failed. Check if a release exists for your architecture ($ARCH)"
+        fi
     fi
 
-    # Extract
     tar -xzf "$tmp_dir/keyva.tar.gz" -C "$tmp_dir"
 
     if [ ! -f "$tmp_dir/keyva" ]; then
@@ -68,14 +80,19 @@ install_binary() {
         error "Extraction failed - binary not found in archive"
     fi
 
-    # Create install directory
     mkdir -p "$INSTALL_DIR"
 
-    # Install
-    mv "$tmp_dir/keyva" "$INSTALL_DIR/$BINARY_NAME"
-    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+    for binary in "${BINARIES[@]}"; do
+        if [ ! -f "$tmp_dir/$binary" ]; then
+            # A release from before the MCP server was published will not have
+            # it. Say so — the tools that read your project depend on it.
+            warn "This release does not include $binary"
+            continue
+        fi
+        mv "$tmp_dir/$binary" "$INSTALL_DIR/$binary"
+        chmod +x "$INSTALL_DIR/$binary"
+    done
 
-    # Cleanup
     rm -rf "$tmp_dir"
 }
 
@@ -118,6 +135,23 @@ setup_path() {
     fi
 }
 
+# Point Claude Code at the server we just installed. Without this it keeps
+# using the sandboxed copy inside Keyva.app, and every tool that touches your
+# project keeps refusing.
+register_mcp() {
+    [ -x "$INSTALL_DIR/keyva-mcp" ] || return 0
+    [ -d "$HOME/.claude" ] || return 0
+
+    echo ""
+    info "Registering the MCP server with Claude Code..."
+    if "$INSTALL_DIR/keyva" mcp install; then
+        success "✓ Claude Code now uses $INSTALL_DIR/keyva-mcp"
+        warn "Restart Claude Code for the change to take effect."
+    else
+        warn "Could not register automatically. Run: keyva mcp install"
+    fi
+}
+
 # Main
 main() {
     echo ""
@@ -127,8 +161,10 @@ main() {
     detect_platform
     get_latest_version
 
-    # Check current version
-    if command -v keyva &>/dev/null; then
+    # Up to date only counts when both binaries are present: someone who
+    # installed an older release has keyva but no server, and skipping would
+    # leave them without the half that reads their project.
+    if command -v keyva &>/dev/null && [ -x "$INSTALL_DIR/keyva-mcp" ]; then
         CURRENT=$(keyva --version 2>/dev/null || echo "0.0.0")
         if [ "$CURRENT" = "$LATEST" ]; then
             success "Already up to date (v$LATEST)"
@@ -139,11 +175,12 @@ main() {
         info "Installing v$LATEST"
     fi
 
-    install_binary
+    install_binaries
     setup_path
+    register_mcp
 
     echo ""
-    success "✓ Keyva CLI v$LATEST installed to $INSTALL_DIR/keyva"
+    success "✓ Keyva v$LATEST installed to $INSTALL_DIR"
     echo ""
     echo "Run 'keyva' to start"
     echo ""
